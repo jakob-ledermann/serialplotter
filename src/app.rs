@@ -1,14 +1,17 @@
 use std::{
     collections::{hash_map::Entry, HashMap, VecDeque},
     sync::mpsc::{channel, Receiver, Sender, TryRecvError},
+    time::{Duration, Instant},
 };
 
-use egui::plot::{Line, Plot, PlotPoints};
-use egui::{InnerResponse, Response, Ui, Widget};
+use egui::{
+    plot::{Line, Plot, PlotPoints},
+    Color32,
+};
+use egui::{InnerResponse, Ui};
 
-use serialport::{available_ports, SerialPort, SerialPortBuilder};
-use tracing;
-use tracing_subscriber::registry::Data;
+use serialport::available_ports;
+use tracing::info;
 
 use crate::value_parsing::{DataValue, SerialSource};
 
@@ -34,6 +37,9 @@ pub struct TemplateApp {
 
     #[serde(skip)]
     sender: Sender<DataValue>,
+
+    #[serde(skip)]
+    open_port: Option<(String, u32)>,
 }
 
 impl Default for TemplateApp {
@@ -48,6 +54,7 @@ impl Default for TemplateApp {
             value_history: ValueHistory::with_capacity(1000),
             receiver: rx,
             sender: tx,
+            open_port: None,
         }
     }
 }
@@ -85,27 +92,40 @@ impl eframe::App for TemplateApp {
             value_history,
             receiver,
             sender,
+            open_port,
             ..
         } = self;
 
-        if let Some(serial_port_name) = serial_port_name {
-            let port = match serialport::new(
-                std::borrow::Cow::Owned(serial_port_name.clone()),
-                *baud_rate,
-            )
-            .open()
-            {
-                Ok(port) => Some(port),
-                Err(err) => {
-                    tracing::error!("Failed to open port: {}", err);
-                    None
-                }
-            };
+        ctx.request_repaint_after(Duration::from_secs_f64(0.05));
 
-            let port = port.map(|x| SerialSource::start(x, sender.clone()));
+        if let Some(serial_port_name) = serial_port_name {
+            match open_port {
+                Some((name, baud)) if name != serial_port_name || baud != baud_rate => {
+                    // close the serial port and open a new one.
+                }
+                Some(_) => {}
+                None => {
+                    let port = match serialport::new(
+                        std::borrow::Cow::Owned(serial_port_name.clone()),
+                        *baud_rate,
+                    )
+                    .open()
+                    {
+                        Ok(port) => Some(port),
+                        Err(err) => {
+                            tracing::error!("Failed to open port: {}", err);
+                            None
+                        }
+                    };
+
+                    *open_port = port
+                        .map(|x| SerialSource::start(x, sender.clone()))
+                        .and_then(|_| Some((serial_port_name.clone(), *baud_rate)));
+                }
+            }
         }
 
-        value_history.try_receive(receiver);
+        while value_history.try_receive(receiver) {}
 
         // Examples of how to create different panels and windows.
         // Pick whichever suits you.
@@ -160,7 +180,7 @@ impl eframe::App for TemplateApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             // The central panel the region left after adding TopPanel's and SidePanel's
-            self.value_history.render_plot(ui);
+            value_history.render_plot(ui);
 
             egui::warn_if_debug_build(ui);
         });
@@ -210,10 +230,10 @@ struct ValueHistory {
 }
 
 impl ValueHistory {
-    pub fn try_receive(&mut self, rx: &mut Receiver<DataValue>) {
+    pub fn try_receive(&mut self, rx: &mut Receiver<DataValue>) -> bool {
         match rx.try_recv() {
-            Err(TryRecvError::Disconnected) => {}
-            Err(TryRecvError::Empty) => {} // Great we are faster at consuming than producing (Blocking is not available as this thread must render the ui)
+            Err(TryRecvError::Disconnected) => false,
+            Err(TryRecvError::Empty) => false, // Great we are faster at consuming than producing (Blocking is not available as this thread must render the ui)
             Ok(value) => {
                 // Oh a new Value lets store it in our buffer
                 match self.buffers.entry(value.name.clone()) {
@@ -230,17 +250,17 @@ impl ValueHistory {
                         entry.insert(buffer);
                     }
                 }
+
+                true
             }
         }
     }
 
     pub fn render_plot(&self, ui: &mut Ui) {
         let lines = self.buffers.iter().map(|(name, buffer)| {
-            let series: PlotPoints = buffer
-                .iter()
-                .map(|x| [x.timestamp.elapsed().as_secs_f64(), x.value])
-                .collect();
-            Line::new(series).name(name)
+            let series: Vec<f64> = buffer.iter().map(|x| x.value).collect();
+            info!("Dataseries {} with {} points", &name, series.len());
+            Line::new(PlotPoints::from_ys_f64(&series)).name(name)
         });
         Plot::new("my_plot")
             .view_aspect(2.0)

@@ -5,11 +5,16 @@
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
     // Log to stdout (if you run with `RUST_LOG=debug`).
+
+    use eframe::HardwareAcceleration;
+
     tracing_subscriber::fmt::init();
 
-    let native_options = eframe::NativeOptions::default();
+    let mut native_options = eframe::NativeOptions::default();
+    native_options.hardware_acceleration = HardwareAcceleration::Preferred;
+    native_options.vsync = true;
     eframe::run_native(
-        "eframe template",
+        "serialplotter",
         native_options,
         Box::new(|cc| Box::new(serialplotter::TemplateApp::new(cc))),
     )
