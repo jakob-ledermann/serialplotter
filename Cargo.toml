@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 eframe = { version = "0.21.3", features = ["persistence"] }
 egui = { version = "0.21.0", features = ["persistence"] }
+regex = "1.8.1"
 serde = { version = "1.0.160", features = ["derive"] }
 serialport = "4.2.0"
 tracing = "0.1.38"

@@ -1,6 +1,16 @@
+use std::{
+    collections::{hash_map::Entry, HashMap, VecDeque},
+    sync::mpsc::{channel, Receiver, Sender, TryRecvError},
+};
+
+use egui::plot::{Line, Plot, PlotPoints};
 use egui::{InnerResponse, Response, Ui, Widget};
+
 use serialport::{available_ports, SerialPort, SerialPortBuilder};
 use tracing;
+use tracing_subscriber::registry::Data;
+
+use crate::value_parsing::{DataValue, SerialSource};
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -17,18 +27,27 @@ pub struct TemplateApp {
     baud_rate: u32,
 
     #[serde(skip)]
-    serial_port: Option<Box<dyn SerialPort>>,
+    value_history: ValueHistory,
+
+    #[serde(skip)]
+    receiver: Receiver<DataValue>,
+
+    #[serde(skip)]
+    sender: Sender<DataValue>,
 }
 
 impl Default for TemplateApp {
     fn default() -> Self {
+        let (tx, rx) = channel();
         Self {
             // Example stuff:
             label: "Hello World!".to_owned(),
             value: 2.7,
             serial_port_name: None,
             baud_rate: 9600,
-            serial_port: None,
+            value_history: ValueHistory::with_capacity(1000),
+            receiver: rx,
+            sender: tx,
         }
     }
 }
@@ -63,25 +82,30 @@ impl eframe::App for TemplateApp {
             value,
             serial_port_name,
             baud_rate,
-            serial_port,
+            value_history,
+            receiver,
+            sender,
+            ..
         } = self;
 
-        if serial_port.is_none() {
-            if let Some(serial_port_name) = serial_port_name {
-                *serial_port = match serialport::new(
-                    std::borrow::Cow::Owned(serial_port_name.clone()),
-                    *baud_rate,
-                )
-                .open()
-                {
-                    Ok(port) => Some(port),
-                    Err(err) => {
-                        tracing::error!("Failed to open port: {}", err);
-                        None
-                    }
+        if let Some(serial_port_name) = serial_port_name {
+            let port = match serialport::new(
+                std::borrow::Cow::Owned(serial_port_name.clone()),
+                *baud_rate,
+            )
+            .open()
+            {
+                Ok(port) => Some(port),
+                Err(err) => {
+                    tracing::error!("Failed to open port: {}", err);
+                    None
                 }
-            }
+            };
+
+            let port = port.map(|x| SerialSource::start(x, sender.clone()));
         }
+
+        value_history.try_receive(receiver);
 
         // Examples of how to create different panels and windows.
         // Pick whichever suits you.
@@ -136,13 +160,8 @@ impl eframe::App for TemplateApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             // The central panel the region left after adding TopPanel's and SidePanel's
+            self.value_history.render_plot(ui);
 
-            ui.heading("eframe template");
-            ui.hyperlink("https://github.com/emilk/eframe_template");
-            ui.add(egui::github_link_file!(
-                "https://github.com/emilk/eframe_template/blob/master/",
-                "Source code."
-            ));
             egui::warn_if_debug_build(ui);
         });
 
@@ -183,4 +202,59 @@ fn create_baud_rate_selection(ui: &mut Ui, baud_rate: &mut u32) -> InnerResponse
             ui.selectable_value(baud_rate, 115200, "115200");
             // TODO weitere Baudraten anbieten
         })
+}
+
+struct ValueHistory {
+    buffers: HashMap<String, VecDeque<DataValue>>,
+    cap: usize,
+}
+
+impl ValueHistory {
+    pub fn try_receive(&mut self, rx: &mut Receiver<DataValue>) {
+        match rx.try_recv() {
+            Err(TryRecvError::Disconnected) => {}
+            Err(TryRecvError::Empty) => {} // Great we are faster at consuming than producing (Blocking is not available as this thread must render the ui)
+            Ok(value) => {
+                // Oh a new Value lets store it in our buffer
+                match self.buffers.entry(value.name.clone()) {
+                    Entry::Occupied(mut entry) => {
+                        let buffer = entry.get_mut();
+                        if buffer.len() >= self.cap {
+                            let _ = buffer.pop_front();
+                        }
+                        buffer.push_back(value);
+                    }
+                    Entry::Vacant(entry) => {
+                        let mut buffer = VecDeque::with_capacity(self.cap);
+                        buffer.push_back(value);
+                        entry.insert(buffer);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn render_plot(&self, ui: &mut Ui) {
+        let lines = self.buffers.iter().map(|(name, buffer)| {
+            let series: PlotPoints = buffer
+                .iter()
+                .map(|x| [x.timestamp.elapsed().as_secs_f64(), x.value])
+                .collect();
+            Line::new(series).name(name)
+        });
+        Plot::new("my_plot")
+            .view_aspect(2.0)
+            .auto_bounds_x()
+            .auto_bounds_y()
+            .show(ui, |plot_ui| {
+                lines.for_each(|line| plot_ui.line(line));
+            });
+    }
+
+    fn with_capacity(capacity: usize) -> Self {
+        ValueHistory {
+            buffers: HashMap::new(),
+            cap: capacity,
+        }
+    }
 }

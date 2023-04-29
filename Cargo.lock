@@ -1891,6 +1891,7 @@ dependencies = [
  "console_error_panic_hook",
  "eframe",
  "egui",
+ "regex",
  "serde",
  "serialport",
  "tracing",
