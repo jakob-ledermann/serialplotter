@@ -5,7 +5,7 @@ use std::{
 };
 
 use egui::{
-    plot::{Line, Plot, PlotPoints},
+    plot::{Legend, Line, Plot, PlotPoints},
     Color32,
 };
 use egui::{InnerResponse, Ui};
@@ -266,6 +266,7 @@ impl ValueHistory {
             .view_aspect(2.0)
             .auto_bounds_x()
             .auto_bounds_y()
+            .legend(Legend::default())
             .show(ui, |plot_ui| {
                 lines.for_each(|line| plot_ui.line(line));
             });
