@@ -19,12 +19,9 @@ use crate::value_parsing::{DataValue, SerialSource};
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)] // if we add new fields, give them default values when deserializing old state
 pub struct TemplateApp {
-    // Example stuff:
-    label: String,
-
     // this how you opt-out of serialization of a member
-    #[serde(skip)]
-    value: f32,
+    displayed_values: usize,
+    max_fetch_count: usize,
 
     serial_port_name: Option<String>,
     baud_rate: u32,
@@ -47,8 +44,8 @@ impl Default for TemplateApp {
         let (tx, rx) = channel();
         Self {
             // Example stuff:
-            label: "Hello World!".to_owned(),
-            value: 2.7,
+            displayed_values: 1000,
+            max_fetch_count: 100,
             serial_port_name: None,
             baud_rate: 9600,
             value_history: ValueHistory::with_capacity(1000),
@@ -85,18 +82,16 @@ impl eframe::App for TemplateApp {
     /// Put your widgets into a `SidePanel`, `TopPanel`, `CentralPanel`, `Window` or `Area`.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let Self {
-            label,
-            value,
             serial_port_name,
             baud_rate,
             value_history,
             receiver,
             sender,
             open_port,
+            max_fetch_count,
+            displayed_values,
             ..
         } = self;
-
-        ctx.request_repaint_after(Duration::from_secs_f64(0.05));
 
         if let Some(serial_port_name) = serial_port_name {
             match open_port {
@@ -125,7 +120,11 @@ impl eframe::App for TemplateApp {
             }
         }
 
-        while value_history.try_receive(receiver) {}
+        value_history.set_capacity(*displayed_values);
+        let mut count = *max_fetch_count;
+        while value_history.try_receive(receiver) && count > 0 {
+            count -= 1;
+        }
 
         // Examples of how to create different panels and windows.
         // Pick whichever suits you.
@@ -147,15 +146,15 @@ impl eframe::App for TemplateApp {
         egui::SidePanel::left("side_panel").show(ctx, |ui| {
             ui.heading("Side Panel");
 
-            ui.horizontal(|ui| {
-                ui.label("Write something: ");
-                ui.text_edit_singleline(label);
-            });
+            let mut scaled_value = (*displayed_values).clamp(0usize, 10000usize) as f64 / 1000.0;
+            ui.add(egui::Slider::new(&mut scaled_value, 0.0..=10.0).text("displayed values"));
 
-            ui.add(egui::Slider::new(value, 0.0..=10.0).text("value"));
-            if ui.button("Increment").clicked() {
-                *value += 1.0;
-            }
+            *displayed_values = (scaled_value * 1000.0).round().clamp(100.0, 10000.0) as usize;
+
+            let mut scaled_value = (*max_fetch_count).clamp(1, 10000) as f64 / 1000.0;
+            ui.add(egui::Slider::new(&mut scaled_value, 0.0..=10.0).text("fetch count"));
+
+            *max_fetch_count = (scaled_value * 1000.0).round().clamp(10f64, 10000f64) as usize;
 
             ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
                 ui.label("Serialport configuration");
@@ -193,6 +192,8 @@ impl eframe::App for TemplateApp {
                 ui.label("You would normally choose either panels OR windows.");
             });
         }
+
+        ctx.request_repaint_after(Duration::from_secs_f64(0.05));
     }
 }
 
@@ -276,6 +277,15 @@ impl ValueHistory {
         ValueHistory {
             buffers: HashMap::new(),
             cap: capacity,
+        }
+    }
+
+    fn set_capacity(&mut self, capacity: usize) {
+        self.cap = capacity;
+        for (_name, buffer) in self.buffers.iter_mut() {
+            while buffer.len() >= self.cap {
+                buffer.pop_front();
+            }
         }
     }
 }
