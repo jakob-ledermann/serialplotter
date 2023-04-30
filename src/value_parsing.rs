@@ -13,7 +13,7 @@ pub struct DataValue {
 }
 
 use serialport::SerialPort;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 pub struct SerialSource {
     port: Box<dyn SerialPort>,
@@ -30,6 +30,8 @@ fn process_serial_data(
     port: Box<dyn SerialPort>,
     mut datasender: std::sync::mpsc::Sender<DataValue>,
 ) {
+    let span = tracing::span!(tracing::Level::DEBUG, "Processing Serialport");
+    let _scope = span.enter();
     let name = port.name();
     info!("Start reading from {:?}", &name);
     let mut bufreader = BufReader::new(port);
@@ -39,10 +41,7 @@ fn process_serial_data(
         let result = bufreader.read_line(&mut line);
         let result = match result {
             Ok(0) => Ok(()),
-            Ok(x) => {
-                bufreader.consume(x);
-                parse_data(&line, &mut datasender)
-            }
+            Ok(_x) => parse_data(&line, &mut datasender),
             Err(err) => {
                 warn!("Error reading from buffer: {}", err);
                 Err(ParseError::ChannelClosed)

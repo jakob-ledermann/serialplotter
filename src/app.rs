@@ -6,14 +6,18 @@ use std::{
 
 use egui::{
     plot::{Legend, Line, Plot, PlotPoints},
-    Color32,
+    Color32, Widget,
 };
 use egui::{InnerResponse, Ui};
 
 use serialport::available_ports;
 use tracing::info;
+use tracing_subscriber::prelude::*;
 
-use crate::value_parsing::{DataValue, SerialSource};
+use crate::{
+    frame_history::{self, FrameHistory},
+    value_parsing::{DataValue, SerialSource},
+};
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -27,6 +31,9 @@ pub struct TemplateApp {
     baud_rate: u32,
 
     #[serde(skip)]
+    show_log: bool,
+
+    #[serde(skip)]
     value_history: ValueHistory,
 
     #[serde(skip)]
@@ -37,6 +44,9 @@ pub struct TemplateApp {
 
     #[serde(skip)]
     open_port: Option<(String, u32)>,
+
+    #[serde(skip)]
+    fps_history: frame_history::FrameHistory,
 }
 
 impl Default for TemplateApp {
@@ -52,6 +62,8 @@ impl Default for TemplateApp {
             receiver: rx,
             sender: tx,
             open_port: None,
+            show_log: true,
+            fps_history: FrameHistory::default(),
         }
     }
 }
@@ -90,10 +102,24 @@ impl eframe::App for TemplateApp {
             open_port,
             max_fetch_count,
             displayed_values,
+            show_log,
+            fps_history,
             ..
         } = self;
 
+        fps_history.on_new_frame(ctx.input(|x| x.time), None);
+
+        #[cfg(feature = "profiling")]
+        {
+            puffin::profile_function!();
+            puffin::GlobalProfiler::lock().new_frame(); // call once per frame!
+            puffin_egui::profiler_window(ctx);
+        }
+
         if let Some(serial_port_name) = serial_port_name {
+            #[cfg(feature = "profiling")]
+            puffin::profile_scope!("configure serialport");
+
             match open_port {
                 Some((name, baud)) if name != serial_port_name || baud != baud_rate => {
                     // close the serial port and open a new one.
@@ -120,11 +146,7 @@ impl eframe::App for TemplateApp {
             }
         }
 
-        value_history.set_capacity(*displayed_values);
-        let mut count = *max_fetch_count;
-        while value_history.try_receive(receiver) && count > 0 {
-            count -= 1;
-        }
+        value_history.update(receiver, *displayed_values, *max_fetch_count);
 
         // Examples of how to create different panels and windows.
         // Pick whichever suits you.
@@ -133,6 +155,9 @@ impl eframe::App for TemplateApp {
 
         #[cfg(not(target_arch = "wasm32"))] // no File->Quit on web pages!
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
+            #[cfg(feature = "profiling")]
+            puffin::profile_scope!("top_panel");
+
             // The top panel is often a good place for a menu bar:
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -144,6 +169,9 @@ impl eframe::App for TemplateApp {
         });
 
         egui::SidePanel::left("side_panel").show(ctx, |ui| {
+            #[cfg(feature = "profiling")]
+            puffin::profile_scope!("side panel");
+
             ui.heading("Side Panel");
 
             let mut scaled_value = (*displayed_values).clamp(0usize, 10000usize) as f64 / 1000.0;
@@ -155,6 +183,8 @@ impl eframe::App for TemplateApp {
             ui.add(egui::Slider::new(&mut scaled_value, 0.0..=10.0).text("fetch count"));
 
             *max_fetch_count = (scaled_value * 1000.0).round().clamp(10f64, 10000f64) as usize;
+
+            ui.checkbox(show_log, "Show tracing log");
 
             ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
                 ui.label("Serialport configuration");
@@ -174,6 +204,9 @@ impl eframe::App for TemplateApp {
                     );
                     ui.label(".");
                 });
+
+                ui.label(format!("FPS: {}", fps_history.fps()));
+                //fps_history.ui(ui);
             });
         });
 
@@ -184,6 +217,19 @@ impl eframe::App for TemplateApp {
             egui::warn_if_debug_build(ui);
         });
 
+        if *show_log {
+            #[cfg(feature = "profiling")]
+            puffin::profile_scope!("Display Log");
+
+            egui::TopBottomPanel::bottom("log").show(ctx, |ui| {
+                let widget = tracing_egui::Widget {
+                    filter: true,
+                    ..Default::default()
+                };
+                ui.add(widget);
+            });
+        }
+
         if false {
             egui::Window::new("Window").show(ctx, |ui| {
                 ui.label("Windows can be moved by dragging them.");
@@ -193,7 +239,8 @@ impl eframe::App for TemplateApp {
             });
         }
 
-        ctx.request_repaint_after(Duration::from_secs_f64(0.05));
+        ctx.request_repaint();
+        //ctx.request_repaint_after(Duration::from_secs_f64(0.05));
     }
 }
 
@@ -226,12 +273,15 @@ fn create_baud_rate_selection(ui: &mut Ui, baud_rate: &mut u32) -> InnerResponse
 }
 
 struct ValueHistory {
-    buffers: HashMap<String, VecDeque<DataValue>>,
+    buffers: HashMap<String, VecDeque<f64>>,
     cap: usize,
 }
 
 impl ValueHistory {
     pub fn try_receive(&mut self, rx: &mut Receiver<DataValue>) -> bool {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("receive data");
+
         match rx.try_recv() {
             Err(TryRecvError::Disconnected) => false,
             Err(TryRecvError::Empty) => false, // Great we are faster at consuming than producing (Blocking is not available as this thread must render the ui)
@@ -243,11 +293,11 @@ impl ValueHistory {
                         if buffer.len() >= self.cap {
                             let _ = buffer.pop_front();
                         }
-                        buffer.push_back(value);
+                        buffer.push_back(value.value);
                     }
                     Entry::Vacant(entry) => {
                         let mut buffer = VecDeque::with_capacity(self.cap);
-                        buffer.push_back(value);
+                        buffer.push_back(value.value);
                         entry.insert(buffer);
                     }
                 }
@@ -258,8 +308,11 @@ impl ValueHistory {
     }
 
     pub fn render_plot(&self, ui: &mut Ui) {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("plot_rendering");
+
         let lines = self.buffers.iter().map(|(name, buffer)| {
-            let series: Vec<f64> = buffer.iter().map(|x| x.value).collect();
+            let series: Vec<f64> = buffer.iter().map(|x| *x).collect();
             info!("Dataseries {} with {} points", &name, series.len());
             Line::new(PlotPoints::from_ys_f64(&series)).name(name)
         });
@@ -285,6 +338,39 @@ impl ValueHistory {
         for (_name, buffer) in self.buffers.iter_mut() {
             while buffer.len() >= self.cap {
                 buffer.pop_front();
+            }
+        }
+    }
+
+    fn update(
+        &mut self,
+        receiver: &mut Receiver<DataValue>,
+        displayed_values: usize,
+        max_fetch_count: usize,
+    ) {
+        #[cfg(feature = "profiling")]
+        puffin::profile_scope!("update serial values");
+
+        self.set_capacity(displayed_values);
+        let mut count = max_fetch_count;
+        while self.try_receive(receiver) && count > 0 {
+            count -= 1;
+        }
+
+        let count = max_fetch_count - count;
+        match self.buffers.entry("fetch_count".to_string()) {
+            Entry::Occupied(mut entry) => {
+                let buffer = entry.get_mut();
+                buffer.push_back(count as f64);
+                if buffer.len() >= self.cap {
+                    buffer.pop_front();
+                }
+            }
+            Entry::Vacant(entry) => {
+                let mut buffer = VecDeque::with_capacity(self.cap);
+                buffer.push_back(count as f64);
+
+                entry.insert(buffer);
             }
         }
     }

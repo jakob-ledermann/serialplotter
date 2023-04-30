@@ -6,12 +6,20 @@
 fn main() -> eframe::Result<()> {
     // Log to stdout (if you run with `RUST_LOG=debug`).
 
-    use eframe::HardwareAcceleration;
+    use tracing_subscriber::prelude::*;
 
-    tracing_subscriber::fmt::init();
+    #[cfg(feature = "profiling")]
+    start_puffin_server();
 
-    let mut native_options = eframe::NativeOptions::default();
-    native_options.hardware_acceleration = HardwareAcceleration::Preferred;
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().pretty())
+        .with(tracing_memory::layer())
+        .init();
+
+    let mut native_options = eframe::NativeOptions {
+        vsync: false,
+        ..Default::default()
+    };
     native_options.vsync = true;
     eframe::run_native(
         "serialplotter",
@@ -40,4 +48,9 @@ fn main() {
         .await
         .expect("failed to start eframe");
     });
+}
+
+#[cfg(feature = "profiling")]
+fn start_puffin_server() {
+    puffin::set_scopes_on(true); // tell puffin to collect data
 }
