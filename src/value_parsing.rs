@@ -7,7 +7,7 @@ use std::{
 
 use crossbeam::channel::{Receiver, SendError, Sender};
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct DataValue {
     pub name: String,
     pub value: f64,
@@ -128,6 +128,7 @@ fn process_serial_data(
     info!("Stop reading from {:?}", &name);
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum ParseError {
     ChannelClosed,
     InvalidFormat,
@@ -166,6 +167,158 @@ fn parse_data(data: &str, sender: &mut Sender<DataValue>) -> Result<(), ParseErr
     }
     info!(target: "pending_data", count=sender.len(), "Sender sees {} pending messages", sender.len());
     result
+}
+
+mod parsing_state_machine {
+    use std::{future::Pending, mem};
+
+    use super::{DataValue, ParseError};
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum ParsingResult {
+        Ok(Vec<DataValue>),
+        Pending,
+        Err(ParseError),
+    }
+
+    #[derive(Debug, Clone)]
+    struct Parser {
+        name: Option<String>,
+        value: String,
+        completedValues: Vec<DataValue>,
+    }
+
+    impl Parser {
+        pub fn new() -> Self {
+            Self {
+                name: None,
+                value: String::with_capacity(10),
+                completedValues: Vec::new(),
+            }
+        }
+
+        pub fn parse(&mut self, byte: u8) -> ParsingResult {
+            match byte {
+                b'\n' => self.finish(),
+                b',' => {
+                    self.complete_value();
+                    ParsingResult::Pending
+                }
+                b':' => {
+                    let name = mem::take(&mut self.value);
+                    self.name = Some(name);
+
+                    ParsingResult::Pending
+                }
+                b' ' | b'\t' => ParsingResult::Pending, // Whitespace is ignored
+                x => {
+                    self.value
+                        .push(char::from_u32(x.into()).unwrap_or(char::REPLACEMENT_CHARACTER));
+
+                    ParsingResult::Pending
+                }
+            }
+        }
+
+        fn finish(&mut self) -> ParsingResult {
+            self.complete_value();
+            let result = self.completedValues.clone();
+            self.reset();
+            ParsingResult::Ok(result)
+        }
+
+        fn complete_value(&mut self) -> Result<(), ParseError> {
+            let value = self.value.parse().map_err(|x| ParseError::InvalidFormat)?;
+            let data_value = match self.name.take() {
+                None => DataValue {
+                    name: self.completedValues.len().to_string(),
+                    value,
+                },
+                Some(name) => DataValue { name, value },
+            };
+            self.completedValues.push(data_value);
+            self.value.clear();
+            Ok(())
+        }
+
+        fn reset(&mut self) {
+            self.name = None;
+            self.value = String::new();
+            self.completedValues.clear();
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn simple_test() {
+            parser_test(
+                "X:0,Y:0",
+                vec![
+                    DataValue {
+                        name: "X".to_string(),
+                        value: 0.0,
+                    },
+                    DataValue {
+                        name: "Y".to_string(),
+                        value: 0.0,
+                    },
+                ],
+            )
+        }
+
+        #[test]
+        fn should_parse_data_without_names() {
+            parser_test(
+                "0,0",
+                vec![
+                    DataValue {
+                        name: "0".to_string(),
+                        value: 0.0,
+                    },
+                    DataValue {
+                        name: "1".to_string(),
+                        value: 0.0,
+                    },
+                ],
+            )
+        }
+
+        #[test]
+        fn multi_line_test() {
+            let data = "0,0\n1,1";
+            let mut parser = Parser::new();
+
+            for byte in data.bytes() {
+                assert_eq!(parser.parse(byte), ParsingResult::Pending);
+            }
+
+            assert_eq!(
+                parser.finish(),
+                ParsingResult::Ok(vec![
+                    DataValue {
+                        name: "0".to_string(),
+                        value: 0.0,
+                    },
+                    DataValue {
+                        name: "1".to_string(),
+                        value: 0.0,
+                    },
+                ],)
+            )
+        }
+        fn parser_test(data: &str, expected_values: Vec<DataValue>) {
+            let mut parser = Parser::new();
+
+            for byte in data.bytes() {
+                assert_eq!(parser.parse(byte), ParsingResult::Pending);
+            }
+
+            assert_eq!(parser.finish(), ParsingResult::Ok(expected_values))
+        }
+    }
 }
 
 #[cfg(test)]
