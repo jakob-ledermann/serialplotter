@@ -1,19 +1,13 @@
-use std::{
-    collections::{hash_map::Entry, HashMap, VecDeque},
-    sync::mpsc::{channel, Receiver, Sender, TryRecvError},
-    time::{Duration, Instant},
-};
+use std::collections::{hash_map::Entry, HashMap, VecDeque};
 
-use egui::{
-    plot::{Legend, Line, Plot, PlotPoints},
-    Color32, Widget,
-};
+use egui::plot::{Legend, Line, Plot, PlotPoints};
 use egui::{InnerResponse, Ui};
 
+use crossbeam::channel::{Receiver, Sender, TryRecvError};
 use serialport::available_ports;
 use tracing::info;
-use tracing_subscriber::prelude::*;
 
+use crate::value_parsing::Commands;
 use crate::{
     frame_history::{self, FrameHistory},
     value_parsing::{DataValue, SerialSource},
@@ -47,11 +41,14 @@ pub struct TemplateApp {
 
     #[serde(skip)]
     fps_history: frame_history::FrameHistory,
+    #[serde(skip)]
+    command: (Sender<Commands>, Receiver<Commands>),
 }
 
 impl Default for TemplateApp {
     fn default() -> Self {
-        let (tx, rx) = channel();
+        let (tx, rx) = crossbeam::channel::bounded(10000);
+        let (command_tx, command_rx) = crossbeam::channel::bounded(10);
         Self {
             // Example stuff:
             displayed_values: 1000,
@@ -64,6 +61,7 @@ impl Default for TemplateApp {
             open_port: None,
             show_log: true,
             fps_history: FrameHistory::default(),
+            command: (command_tx, command_rx),
         }
     }
 }
@@ -90,6 +88,12 @@ impl eframe::App for TemplateApp {
         eframe::set_value(storage, eframe::APP_KEY, self);
     }
 
+    fn on_close_event(&mut self) -> bool {
+        let Self { command, .. } = self;
+        command.0.send(Commands::Stop);
+        true
+    }
+
     /// Called each time the UI needs repainting, which may be many times per second.
     /// Put your widgets into a `SidePanel`, `TopPanel`, `CentralPanel`, `Window` or `Area`.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -104,6 +108,7 @@ impl eframe::App for TemplateApp {
             displayed_values,
             show_log,
             fps_history,
+            command,
             ..
         } = self;
 
@@ -123,6 +128,7 @@ impl eframe::App for TemplateApp {
             match open_port {
                 Some((name, baud)) if name != serial_port_name || baud != baud_rate => {
                     // close the serial port and open a new one.
+                    command.0.send(Commands::Stop);
                 }
                 Some(_) => {}
                 None => {
@@ -140,8 +146,8 @@ impl eframe::App for TemplateApp {
                     };
 
                     *open_port = port
-                        .map(|x| SerialSource::start(x, sender.clone()))
-                        .and_then(|_| Some((serial_port_name.clone(), *baud_rate)));
+                        .map(|x| SerialSource::start(x, sender.clone(), command.1.clone()))
+                        .map(|_| (serial_port_name.clone(), *baud_rate));
                 }
             }
         }
@@ -286,22 +292,7 @@ impl ValueHistory {
             Err(TryRecvError::Disconnected) => false,
             Err(TryRecvError::Empty) => false, // Great we are faster at consuming than producing (Blocking is not available as this thread must render the ui)
             Ok(value) => {
-                // Oh a new Value lets store it in our buffer
-                match self.buffers.entry(value.name.clone()) {
-                    Entry::Occupied(mut entry) => {
-                        let buffer = entry.get_mut();
-                        if buffer.len() >= self.cap {
-                            let _ = buffer.pop_front();
-                        }
-                        buffer.push_back(value.value);
-                    }
-                    Entry::Vacant(entry) => {
-                        let mut buffer = VecDeque::with_capacity(self.cap);
-                        buffer.push_back(value.value);
-                        entry.insert(buffer);
-                    }
-                }
-
+                self.store_value(value.value, value.name.clone());
                 true
             }
         }
@@ -312,7 +303,7 @@ impl ValueHistory {
         puffin::profile_scope!("plot_rendering");
 
         let lines = self.buffers.iter().map(|(name, buffer)| {
-            let series: Vec<f64> = buffer.iter().map(|x| *x).collect();
+            let series: Vec<f64> = buffer.iter().copied().collect();
             info!("Dataseries {} with {} points", &name, series.len());
             Line::new(PlotPoints::from_ys_f64(&series)).name(name)
         });
@@ -358,17 +349,23 @@ impl ValueHistory {
         }
 
         let count = max_fetch_count - count;
-        match self.buffers.entry("fetch_count".to_string()) {
+        self.store_value(count as f64, "fetch_count".to_string());
+
+        self.store_value(receiver.len() as f64, "pending_messages".to_string());
+    }
+
+    fn store_value(&mut self, value: f64, key: String) {
+        match self.buffers.entry(key) {
             Entry::Occupied(mut entry) => {
                 let buffer = entry.get_mut();
-                buffer.push_back(count as f64);
+                buffer.push_back(value);
                 if buffer.len() >= self.cap {
                     buffer.pop_front();
                 }
             }
             Entry::Vacant(entry) => {
                 let mut buffer = VecDeque::with_capacity(self.cap);
-                buffer.push_back(count as f64);
+                buffer.push_back(value);
 
                 entry.insert(buffer);
             }

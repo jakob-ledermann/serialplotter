@@ -17,7 +17,7 @@ fn main() -> eframe::Result<()> {
         .init();
 
     let mut native_options = eframe::NativeOptions {
-        vsync: false,
+        vsync: true,
         ..Default::default()
     };
     native_options.vsync = true;
