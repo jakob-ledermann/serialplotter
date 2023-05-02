@@ -1,9 +1,6 @@
 use std::{
-    future::Pending,
-    io::{self, BufRead, BufReader},
-    str::FromStr,
+    io::{self},
     thread,
-    time::{Duration, Instant},
 };
 
 use crossbeam::channel::{Receiver, SendError, Sender};
@@ -15,14 +12,13 @@ pub struct DataValue {
 }
 
 use serialport::SerialPort;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::value_parsing::parsing_state_machine::{Parser, ParsingResult};
 
-pub struct SerialSource {
-    port: Box<dyn SerialPort>,
-}
+pub struct SerialSource {}
 
+#[allow(dead_code)]
 pub enum Commands {
     Stop,
     SendMessage(String),
@@ -35,7 +31,7 @@ impl SerialSource {
         command_receiver: Receiver<Commands>,
     ) {
         info!("Start reading from {:?}", port.name());
-        thread::Builder::new()
+        let _thread = thread::Builder::new()
             .name(format!("Read serial {}", port.name().unwrap()))
             .spawn(move || process_serial_data(port, datasender, command_receiver));
     }
@@ -43,7 +39,7 @@ impl SerialSource {
 
 fn process_serial_data(
     mut port: Box<dyn SerialPort>,
-    mut datasender: Sender<DataValue>,
+    datasender: Sender<DataValue>,
     command_receiver: Receiver<Commands>,
 ) {
     #[cfg(feature = "profiling")]
@@ -62,8 +58,8 @@ fn process_serial_data(
     );
     let mut line = String::new();
     let mut buffer = [0u8; 1024];
-    let mut offset = 0;
-    let mut minimum_message_size = buffer.len();
+    let _offset = 0;
+    let _minimum_message_size = buffer.len();
     let mut parser = Parser::new();
     'read_loop: loop {
         if let Ok(command) = command_receiver.try_recv() {
@@ -117,7 +113,7 @@ fn process_serial_data(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum ParseError {
+pub enum ParseError {
     ChannelClosed,
     InvalidFormat,
 }
@@ -127,38 +123,8 @@ impl From<SendError<DataValue>> for ParseError {
         Self::ChannelClosed
     }
 }
-
-fn parse_data(data: &str, sender: &mut Sender<DataValue>) -> Result<(), ParseError> {
-    debug!("Parsing {}", data);
-    let variables = data.split_terminator(',');
-    let mut result = Ok(());
-    for variable in variables {
-        let elements: Vec<_> = variable.split_terminator(':').collect();
-        let (name, value) = match elements[..] {
-            [value] => ("", value.trim()),
-            [name, value] => (name.trim(), value.trim()),
-            _ => return Err(ParseError::InvalidFormat),
-        };
-        let value = value.parse().map_err(|x| {
-            warn!("Error parsing {:?}: {}", value, x);
-            x
-        });
-        if let Ok(value) = value {
-            let data = DataValue {
-                name: name.to_string(),
-                value,
-            };
-            sender.send(data)?;
-        } else {
-            result = Err(ParseError::InvalidFormat);
-        }
-    }
-    info!(target: "pending_data", count=sender.len(), "Sender sees {} pending messages", sender.len());
-    result
-}
-
 mod parsing_state_machine {
-    use std::{future::Pending, mem};
+    use std::mem;
 
     use super::{DataValue, ParseError};
 
@@ -169,11 +135,20 @@ mod parsing_state_machine {
         Err(ParseError),
     }
 
+    impl From<Result<Vec<DataValue>, ParseError>> for ParsingResult {
+        fn from(other: Result<Vec<DataValue>, ParseError>) -> Self {
+            match other {
+                Ok(values) => ParsingResult::Ok(values),
+                Err(err) => ParsingResult::Err(err),
+            }
+        }
+    }
+
     #[derive(Debug, Clone)]
     pub struct Parser {
         name: Option<String>,
         value: String,
-        completedValues: Vec<DataValue>,
+        completed_values: Vec<DataValue>,
     }
 
     impl Parser {
@@ -181,13 +156,13 @@ mod parsing_state_machine {
             Self {
                 name: None,
                 value: String::with_capacity(10),
-                completedValues: Vec::new(),
+                completed_values: Vec::new(),
             }
         }
 
         pub fn parse(&mut self, byte: u8) -> ParsingResult {
             match byte {
-                b'\n' => self.finish(),
+                b'\n' => ParsingResult::from(self.finish()),
                 b',' => match self.complete_value() {
                     Ok(()) => ParsingResult::Pending,
                     Err(err) => ParsingResult::Err(err),
@@ -208,23 +183,23 @@ mod parsing_state_machine {
             }
         }
 
-        fn finish(&mut self) -> ParsingResult {
-            self.complete_value();
-            let result = self.completedValues.clone();
+        fn finish(&mut self) -> Result<Vec<DataValue>, ParseError> {
+            self.complete_value()?;
+            let result = self.completed_values.clone();
             self.reset();
-            ParsingResult::Ok(result)
+            Ok(result)
         }
 
         fn complete_value(&mut self) -> Result<(), ParseError> {
-            let value = self.value.parse().map_err(|x| ParseError::InvalidFormat)?;
+            let value = self.value.parse().map_err(|_x| ParseError::InvalidFormat)?;
             let data_value = match self.name.take() {
                 None => DataValue {
-                    name: self.completedValues.len().to_string(),
+                    name: self.completed_values.len().to_string(),
                     value,
                 },
                 Some(name) => DataValue { name, value },
             };
-            self.completedValues.push(data_value);
+            self.completed_values.push(data_value);
             self.value.clear();
             Ok(())
         }
@@ -232,7 +207,7 @@ mod parsing_state_machine {
         fn reset(&mut self) {
             self.name = None;
             self.value = String::new();
-            self.completedValues.clear();
+            self.completed_values.clear();
         }
     }
 
@@ -303,7 +278,7 @@ mod parsing_state_machine {
 
             assert_eq!(
                 parser.finish(),
-                ParsingResult::Ok(vec![
+                Result::Ok(vec![
                     DataValue {
                         name: "0".to_string(),
                         value: 1.0,
@@ -323,34 +298,7 @@ mod parsing_state_machine {
                 assert_eq!(parser.parse(byte), ParsingResult::Pending);
             }
 
-            assert_eq!(parser.finish(), ParsingResult::Ok(expected_values))
+            assert_eq!(parser.finish(), Result::Ok(expected_values))
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parsing_test() {
-        let sample = "X:0,Y:0";
-        let (mut tx, rx) = crossbeam::channel::unbounded();
-        parse_data(sample, &mut tx);
-
-        assert_eq!(
-            rx.recv(),
-            Ok(DataValue {
-                name: String::from("X"),
-                value: 0.0
-            })
-        );
-        assert_eq!(
-            rx.recv(),
-            Ok(DataValue {
-                name: String::from("Y"),
-                value: 0.0
-            })
-        );
     }
 }

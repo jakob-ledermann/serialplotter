@@ -90,7 +90,7 @@ impl eframe::App for TemplateApp {
 
     fn on_close_event(&mut self) -> bool {
         let Self { command, .. } = self;
-        command.0.send(Commands::Stop);
+        let _ = command.0.send(Commands::Stop);
         true
     }
 
@@ -240,7 +240,7 @@ impl eframe::App for TemplateApp {
 }
 
 fn close_serial_port(command: &mut (Sender<Commands>, Receiver<Commands>)) {
-    command.0.send(Commands::Stop);
+    let _ = command.0.send(Commands::Stop); // Err: channel is already disconnected, so there is nothing to close.
 }
 
 fn open_serial_port(

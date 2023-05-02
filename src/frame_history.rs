@@ -14,6 +14,7 @@ impl Default for FrameHistory {
     }
 }
 
+#[allow(dead_code)]
 impl FrameHistory {
     // Called first
     pub fn on_new_frame(&mut self, now: f64, previous_frame_time: Option<f32>) {
@@ -94,7 +95,7 @@ impl FrameHistory {
                 line_stroke,
             ));
             let cpu_usage = to_screen.inverse().transform_pos(pointer_pos).y;
-            let text = format!("{:.1} ms", 1e3 * cpu_usage);
+            let _text = format!("{:.1} ms", 1e3 * cpu_usage);
             /*             shapes.push(Shape::text(
                 &fonts,
                 pos2(rect.left(), y),
