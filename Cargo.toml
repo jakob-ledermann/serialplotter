@@ -12,8 +12,10 @@ regex = "1.8.1"
 serde = { version = "1.0.160", features = ["derive"] }
 serialport = "4.2.0"
 tracing = "0.1.37"
-tracing-egui = { path = "../tracing-utils/libs/tracing-egui" }
-tracing-memory = { path = "../tracing-utils/libs/tracing-memory" }
+#tracing-egui = { path = "../tracing-utils/libs/tracing-egui" }
+tracing-egui = { git = "https://github.com/jakob-ledermann/tracing-utils.git", branch = "main"}
+tracing-memory = { git = "https://github.com/jakob-ledermann/tracing-utils.git", branch = "main"}
+#tracing-memory = { path = "../tracing-utils/libs/tracing-memory" }
 puffin = {version = "0.15.0", optional = true}
 puffin_egui = {version = "0.21.0", optional = true}
 crossbeam = "0.8.2"
