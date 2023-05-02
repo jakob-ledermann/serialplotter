@@ -121,37 +121,6 @@ impl eframe::App for TemplateApp {
             puffin_egui::profiler_window(ctx);
         }
 
-        if let Some(serial_port_name) = serial_port_name {
-            #[cfg(feature = "profiling")]
-            puffin::profile_scope!("configure serialport");
-
-            match open_port {
-                Some((name, baud)) if name != serial_port_name || baud != baud_rate => {
-                    // close the serial port and open a new one.
-                    command.0.send(Commands::Stop);
-                }
-                Some(_) => {}
-                None => {
-                    let port = match serialport::new(
-                        std::borrow::Cow::Owned(serial_port_name.clone()),
-                        *baud_rate,
-                    )
-                    .open()
-                    {
-                        Ok(port) => Some(port),
-                        Err(err) => {
-                            tracing::error!("Failed to open port: {}", err);
-                            None
-                        }
-                    };
-
-                    *open_port = port
-                        .map(|x| SerialSource::start(x, sender.clone(), command.1.clone()))
-                        .map(|_| (serial_port_name.clone(), *baud_rate));
-                }
-            }
-        }
-
         value_history.update(receiver, *displayed_values, *max_fetch_count);
 
         // Examples of how to create different panels and windows.
@@ -196,6 +165,26 @@ impl eframe::App for TemplateApp {
                 ui.label("Serialport configuration");
                 create_serial_port_selection(ui, serial_port_name);
                 create_baud_rate_selection(ui, baud_rate);
+
+                match (&open_port, serial_port_name) {
+                    (None, Some(serial_port_name)) => {
+                        if ui.button("open").clicked() {
+                            *open_port = open_serial_port(
+                                serial_port_name.clone(),
+                                baud_rate,
+                                sender,
+                                command.1.clone(),
+                            );
+                        }
+                    }
+                    (Some(_), _) => {
+                        if ui.button("close").clicked() {
+                            close_serial_port(command);
+                            *open_port = None
+                        }
+                    }
+                    (None, None) => {}
+                }
             });
 
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
@@ -248,6 +237,33 @@ impl eframe::App for TemplateApp {
         ctx.request_repaint();
         //ctx.request_repaint_after(Duration::from_secs_f64(0.05));
     }
+}
+
+fn close_serial_port(command: &mut (Sender<Commands>, Receiver<Commands>)) {
+    command.0.send(Commands::Stop);
+}
+
+fn open_serial_port(
+    serial_port_name: String,
+    baud_rate: &u32,
+    sender: &mut Sender<DataValue>,
+    command: Receiver<Commands>,
+) -> Option<(String, u32)> {
+    let port = match serialport::new(
+        std::borrow::Cow::Owned(serial_port_name.clone()),
+        *baud_rate,
+    )
+    .open()
+    {
+        Ok(port) => Some(port),
+        Err(err) => {
+            tracing::error!("Failed to open port: {}", err);
+            None
+        }
+    };
+
+    port.map(|x| SerialSource::start(x, sender.clone(), command))
+        .map(|_| (serial_port_name.clone(), *baud_rate))
 }
 
 fn create_serial_port_selection(
