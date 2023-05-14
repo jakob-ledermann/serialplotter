@@ -1,17 +1,14 @@
-use std::collections::{hash_map::Entry, HashMap, VecDeque};
-
-use egui::plot::{Legend, Line, Plot, PlotPoints};
 use egui::{InnerResponse, Ui};
 
-use crossbeam::channel::{Receiver, Sender, TryRecvError};
+use crossbeam::channel::{Receiver, Sender};
 use serialport::available_ports;
-use tracing::info;
 
 use crate::value_parsing::Commands;
 use crate::{
     frame_history::{self, FrameHistory},
     value_parsing::{DataValue, SerialSource},
 };
+use value_history::*;
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -294,97 +291,4 @@ fn create_baud_rate_selection(ui: &mut Ui, baud_rate: &mut u32) -> InnerResponse
         })
 }
 
-struct ValueHistory {
-    buffers: HashMap<String, VecDeque<f64>>,
-    cap: usize,
-}
-
-impl ValueHistory {
-    pub fn try_receive(&mut self, rx: &mut Receiver<DataValue>) -> bool {
-        #[cfg(feature = "profiling")]
-        puffin::profile_scope!("receive data");
-
-        match rx.try_recv() {
-            Err(TryRecvError::Disconnected) => false,
-            Err(TryRecvError::Empty) => false, // Great we are faster at consuming than producing (Blocking is not available as this thread must render the ui)
-            Ok(value) => {
-                self.store_value(value.value, value.name.clone());
-                true
-            }
-        }
-    }
-
-    pub fn render_plot(&self, ui: &mut Ui) {
-        #[cfg(feature = "profiling")]
-        puffin::profile_scope!("plot_rendering");
-
-        let lines = self.buffers.iter().map(|(name, buffer)| {
-            let series: Vec<f64> = buffer.iter().copied().collect();
-            info!("Dataseries {} with {} points", &name, series.len());
-            Line::new(PlotPoints::from_ys_f64(&series)).name(name)
-        });
-        Plot::new("my_plot")
-            .view_aspect(2.0)
-            .auto_bounds_x()
-            .auto_bounds_y()
-            .legend(Legend::default())
-            .show(ui, |plot_ui| {
-                lines.for_each(|line| plot_ui.line(line));
-            });
-    }
-
-    fn with_capacity(capacity: usize) -> Self {
-        ValueHistory {
-            buffers: HashMap::new(),
-            cap: capacity,
-        }
-    }
-
-    fn set_capacity(&mut self, capacity: usize) {
-        self.cap = capacity;
-        for (_name, buffer) in self.buffers.iter_mut() {
-            while buffer.len() >= self.cap {
-                buffer.pop_front();
-            }
-        }
-    }
-
-    fn update(
-        &mut self,
-        receiver: &mut Receiver<DataValue>,
-        displayed_values: usize,
-        max_fetch_count: usize,
-    ) {
-        #[cfg(feature = "profiling")]
-        puffin::profile_scope!("update serial values");
-
-        self.set_capacity(displayed_values);
-        let mut count = max_fetch_count;
-        while self.try_receive(receiver) && count > 0 {
-            count -= 1;
-        }
-
-        let count = max_fetch_count - count;
-        self.store_value(count as f64, "fetch_count".to_string());
-
-        self.store_value(receiver.len() as f64, "pending_messages".to_string());
-    }
-
-    fn store_value(&mut self, value: f64, key: String) {
-        match self.buffers.entry(key) {
-            Entry::Occupied(mut entry) => {
-                let buffer = entry.get_mut();
-                buffer.push_back(value);
-                if buffer.len() >= self.cap {
-                    buffer.pop_front();
-                }
-            }
-            Entry::Vacant(entry) => {
-                let mut buffer = VecDeque::with_capacity(self.cap);
-                buffer.push_back(value);
-
-                entry.insert(buffer);
-            }
-        }
-    }
-}
+mod value_history;
