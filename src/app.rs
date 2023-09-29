@@ -2,12 +2,14 @@ use egui::{InnerResponse, Ui};
 
 use crossbeam::channel::{Receiver, Sender};
 use serialport::available_ports;
+use tracing::info;
 
 use crate::value_parsing::Commands;
 use crate::{
     frame_history::{self, FrameHistory},
     value_parsing::{DataValue, SerialSource},
 };
+use gilrs::Gilrs;
 use value_history::*;
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
@@ -40,10 +42,14 @@ pub struct TemplateApp {
     fps_history: frame_history::FrameHistory,
     #[serde(skip)]
     command: (Sender<Commands>, Receiver<Commands>),
+
+    #[serde(skip)]
+    gilrs: Gilrs,
 }
 
 impl Default for TemplateApp {
     fn default() -> Self {
+        let gilrs = Gilrs::new().unwrap();
         let (tx, rx) = crossbeam::channel::bounded(10000);
         let (command_tx, command_rx) = crossbeam::channel::bounded(10);
         Self {
@@ -59,6 +65,7 @@ impl Default for TemplateApp {
             show_log: true,
             fps_history: FrameHistory::default(),
             command: (command_tx, command_rx),
+            gilrs,
         }
     }
 }
@@ -106,8 +113,24 @@ impl eframe::App for TemplateApp {
             show_log,
             fps_history,
             command,
+            gilrs,
             ..
         } = self;
+
+        let mut update_display = false;
+
+        // Examine new events
+        while let Some(gilrs::Event { id, event, time }) = gilrs.next_event() {
+            match event {
+                gilrs::EventType::ButtonPressed(_, _)
+                | gilrs::EventType::ButtonReleased(_, _)
+                | gilrs::EventType::ButtonRepeated(_, _) => {
+                    info!("{:?} New event from {}: {:?}", time, id, event);
+                    update_display = true;
+                }
+                _ => {}
+            }
+        }
 
         fps_history.on_new_frame(ctx.input(|x| x.time), None);
 
@@ -118,7 +141,9 @@ impl eframe::App for TemplateApp {
             puffin_egui::profiler_window(ctx);
         }
 
-        value_history.update(receiver, *displayed_values, *max_fetch_count);
+        if update_display {
+            value_history.update(receiver, *displayed_values, *max_fetch_count);
+        }
 
         // Examples of how to create different panels and windows.
         // Pick whichever suits you.
@@ -146,15 +171,15 @@ impl eframe::App for TemplateApp {
 
             ui.heading("Side Panel");
 
-            let mut scaled_value = (*displayed_values).clamp(0usize, 10000usize) as f64 / 1000.0;
-            ui.add(egui::Slider::new(&mut scaled_value, 0.0..=10.0).text("displayed values"));
+            let mut scaled_value = (*displayed_values).clamp(0usize, 100000usize) as f64 / 1000.0;
+            ui.add(egui::Slider::new(&mut scaled_value, 0.0..=100.0).text("displayed values"));
 
-            *displayed_values = (scaled_value * 1000.0).round().clamp(100.0, 10000.0) as usize;
+            *displayed_values = (scaled_value * 1000.0).round().clamp(100.0, 100000.0) as usize;
 
-            let mut scaled_value = (*max_fetch_count).clamp(1, 10000) as f64 / 1000.0;
-            ui.add(egui::Slider::new(&mut scaled_value, 0.0..=10.0).text("fetch count"));
+            let mut scaled_value = (*max_fetch_count).clamp(1, 100000) as f64 / 1000.0;
+            ui.add(egui::Slider::new(&mut scaled_value, 0.0..=100.0).text("fetch count"));
 
-            *max_fetch_count = (scaled_value * 1000.0).round().clamp(10f64, 10000f64) as usize;
+            *max_fetch_count = (scaled_value * 1000.0).round().clamp(10f64, 100000f64) as usize;
 
             ui.checkbox(show_log, "Show tracing log");
 
